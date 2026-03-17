@@ -46,7 +46,18 @@ class LLMJudge:
             response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                messages=[{"role": "user", "content": prompt}]
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ],
+                stream=False
             )
             text = response.choices[0].message.content
 
