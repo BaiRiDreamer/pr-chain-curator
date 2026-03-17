@@ -4,11 +4,16 @@ github:
   max_workers: 20
 
 llm:
-  provider: openai  # anthropic or openai
-  api_key: ${OPENAI_API_KEY}  # or ${ANTHROPIC_API_KEY}
-  model: gpt-4  # or claude-3-5-sonnet-20241022
-  base_url: null  # for OpenAI-compatible APIs (e.g., https://api.deepseek.com)
+  provider: azure  # anthropic, openai, or azure
+  api_key: apikey
+  model: gpt-5.4-2026-03-05
   max_tokens: 2048
+
+  # Azure OpenAI specific
+  api_version: "2024-02-01"
+  azure_endpoint: http
+  default_headers:
+    X-TT-LOGID: pr-chain-curator
 
 filtering:
   min_chain_length: 2

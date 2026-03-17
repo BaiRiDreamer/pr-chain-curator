@@ -1,12 +1,15 @@
-"""LLM 判断模块 - 支持 Claude 和 OpenAI"""
+"""LLM 判断模块 - 支持 Claude、OpenAI 和 Azure OpenAI"""
 import json
-from typing import List
+from typing import List, Dict, Optional
 from .models import PullRequest, LLMJudgment
 
 class LLMJudge:
     """LLM 判断器"""
 
-    def __init__(self, provider: str, api_key: str, model: str, base_url: str = None, max_tokens: int = 2048):
+    def __init__(self, provider: str, api_key: str, model: str,
+                 base_url: str = None, max_tokens: int = 2048,
+                 api_version: str = None, azure_endpoint: str = None,
+                 default_headers: Dict = None):
         self.provider = provider.lower()
         self.model = model
         self.max_tokens = max_tokens
@@ -14,6 +17,14 @@ class LLMJudge:
         if self.provider == "anthropic":
             import anthropic
             self.client = anthropic.Anthropic(api_key=api_key)
+        elif self.provider == "azure":
+            from openai import AzureOpenAI
+            self.client = AzureOpenAI(
+                api_key=api_key,
+                api_version=api_version or "2024-02-01",
+                azure_endpoint=azure_endpoint,
+                default_headers=default_headers or {}
+            )
         elif self.provider == "openai":
             from openai import OpenAI
             self.client = OpenAI(api_key=api_key, base_url=base_url)
@@ -31,7 +42,7 @@ class LLMJudge:
                 messages=[{"role": "user", "content": prompt}]
             )
             text = response.content[0].text
-        else:  # openai
+        else:  # openai or azure
             response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,

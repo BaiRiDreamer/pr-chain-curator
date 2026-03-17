@@ -51,7 +51,10 @@ def filter(input, output, config, max_chains):
         api_key=cfg['llm']['api_key'],
         model=cfg['llm']['model'],
         base_url=cfg['llm'].get('base_url'),
-        max_tokens=cfg['llm']['max_tokens']
+        max_tokens=cfg['llm']['max_tokens'],
+        api_version=cfg['llm'].get('api_version'),
+        azure_endpoint=cfg['llm'].get('azure_endpoint'),
+        default_headers=cfg['llm'].get('default_headers')
     )
 
     chain_filter = ChainFilter(fetcher, llm_judge, cfg)
