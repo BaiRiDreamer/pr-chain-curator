@@ -1,0 +1,20 @@
+github:
+  token: ${GITHUB_TOKEN}
+  rate_limit_delay: 0.5
+  max_workers: 20
+
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}
+  model: claude-3-5-sonnet-20241022
+  max_tokens: 2048
+
+filtering:
+  min_chain_length: 2
+  max_chain_length: 10
+  max_time_span_days: 1095
+  score_threshold: 7.0
+  confidence_threshold: 0.7
+
+cache:
+  enabled: true
+  dir: data/cache
