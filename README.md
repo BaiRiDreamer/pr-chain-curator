@@ -4,11 +4,12 @@
 
 ## 功能特性
 
-- ✅ 基于 LLM 的语义分析和质量评估
+- ✅ 基于 LLM 的语义分析和质量评估（支持 OpenAI 和 Anthropic）
 - ✅ 多线程并发处理 GitHub API
 - ✅ 文件系统缓存机制
 - ✅ 文件重叠分析
 - ✅ 多维度标注（演化模式、功能类型）
+- ✅ 支持 OpenAI 兼容的 API（DeepSeek、本地模型等）
 
 ## 安装
 
@@ -19,14 +20,51 @@ pip install -r requirements.txt
 
 ## 配置
 
-设置环境变量：
+### 使用 OpenAI (推荐)
+
+```bash
+export GITHUB_TOKEN="your_github_token"
+export OPENAI_API_KEY="your_openai_key"
+```
+
+编辑 `config/config.yaml`:
+```yaml
+llm:
+  provider: openai
+  model: gpt-4
+```
+
+### 使用 Anthropic Claude
 
 ```bash
 export GITHUB_TOKEN="your_github_token"
 export ANTHROPIC_API_KEY="your_anthropic_key"
 ```
 
-或编辑 `config/config.yaml`。
+编辑 `config/config.yaml`:
+```yaml
+llm:
+  provider: anthropic
+  model: claude-3-5-sonnet-20241022
+```
+
+### 使用 OpenAI 兼容 API (DeepSeek 等)
+
+```bash
+export GITHUB_TOKEN="your_github_token"
+export DEEPSEEK_API_KEY="your_deepseek_key"
+```
+
+编辑 `config/config.yaml`:
+```yaml
+llm:
+  provider: openai
+  api_key: ${DEEPSEEK_API_KEY}
+  model: deepseek-chat
+  base_url: https://api.deepseek.com
+```
+
+更多配置示例见 `config/config.examples.md`。
 
 ## 使用
 

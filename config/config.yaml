@@ -3,9 +3,11 @@ github:
   rate_limit_delay: 0.5
   max_workers: 20
 
-anthropic:
-  api_key: ${ANTHROPIC_API_KEY}
-  model: claude-3-5-sonnet-20241022
+llm:
+  provider: openai  # anthropic or openai
+  api_key: ${OPENAI_API_KEY}  # or ${ANTHROPIC_API_KEY}
+  model: gpt-4  # or claude-3-5-sonnet-20241022
+  base_url: null  # for OpenAI-compatible APIs (e.g., https://api.deepseek.com)
   max_tokens: 2048
 
 filtering:

@@ -1,59 +1,75 @@
-"""LLM 判断模块"""
+"""LLM 判断模块 - 支持 Claude 和 OpenAI"""
 import json
-import anthropic
 from typing import List
 from .models import PullRequest, LLMJudgment
 
 class LLMJudge:
     """LLM 判断器"""
 
-    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022", max_tokens: int = 2048):
-        self.client = anthropic.Anthropic(api_key=api_key)
+    def __init__(self, provider: str, api_key: str, model: str, base_url: str = None, max_tokens: int = 2048):
+        self.provider = provider.lower()
         self.model = model
         self.max_tokens = max_tokens
+
+        if self.provider == "anthropic":
+            import anthropic
+            self.client = anthropic.Anthropic(api_key=api_key)
+        elif self.provider == "openai":
+            from openai import OpenAI
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
 
     def judge_chain(self, prs: List[PullRequest], repo: str) -> LLMJudgment:
         """判断 PR 链质量"""
         prompt = self._build_prompt(prs, repo)
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=[{"role": "user", "content": prompt}]
-        )
 
-        # 解析响应
-        text = response.content[0].text
+        if self.provider == "anthropic":
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            text = response.content[0].text
+        else:  # openai
+            response = self.client.chat.completions.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            text = response.choices[0].message.content
+
         result = self._parse_response(text)
         return result
 
     def _build_prompt(self, prs: List[PullRequest], repo: str) -> str:
-        """构建 LLM prompt"""
-        prompt = f"""你是 GitHub PR 链质量评估专家。分析以下 PR 链是否构成合理的演化链。
+        """构建 LLM prompt (英文)"""
+        prompt = f"""You are a GitHub PR chain quality evaluator. Analyze whether the following PR chain forms a reasonable evolution chain.
 
-## PR 链信息
-仓库: {repo}
-PR 数量: {len(prs)}
+## PR Chain Information
+Repository: {repo}
+Number of PRs: {len(prs)}
 
 """
         for i, pr in enumerate(prs, 1):
             prompt += f"""### PR #{i}: {pr.number}
-- 标题: {pr.title}
-- 作者: {pr.user}
-- 创建: {pr.created_at.strftime('%Y-%m-%d')}
-- 合并: {pr.merged_at.strftime('%Y-%m-%d') if pr.merged_at else 'N/A'}
-- 标签: {', '.join(pr.labels) if pr.labels else 'None'}
-- 描述: {pr.body[:200]}...
-- 变更: +{pr.additions} -{pr.deletions} ({pr.changed_files} 文件)
+- Title: {pr.title}
+- Author: {pr.user}
+- Created: {pr.created_at.strftime('%Y-%m-%d')}
+- Merged: {pr.merged_at.strftime('%Y-%m-%d') if pr.merged_at else 'N/A'}
+- Labels: {', '.join(pr.labels) if pr.labels else 'None'}
+- Description: {pr.body[:200]}...
+- Changes: +{pr.additions} -{pr.deletions} ({pr.changed_files} files)
 
 """
 
-        prompt += """## 分析维度 (0-10分)
-1. 主题一致性: PR 是否围绕同一功能/模块?
-2. 逻辑关联性: PR 之间是否有依赖/演化关系?
-3. 时间合理性: 时间间隔和顺序是否合理?
-4. 作者一致性: 多作者是否合理?
+        prompt += """## Analysis Dimensions (0-10 points each)
+1. Topic Consistency: Do these PRs revolve around the same feature/module?
+2. Logical Relevance: Is there a clear dependency or evolution relationship between PRs?
+3. Temporal Reasonableness: Are the time intervals and order reasonable?
+4. Author Consistency: If multiple authors, is the collaboration reasonable?
 
-## 输出 JSON:
+## Output JSON Format:
 ```json
 {
     "is_valid_chain": true,
@@ -65,21 +81,20 @@ PR 数量: {len(prs)}
         "author_consistency": 6
     },
     "overall_score": 7.5,
-    "reasoning": "简要理由",
+    "reasoning": "Brief explanation",
     "evolution_pattern": "incremental_enhancement",
     "function_types": ["ENH"],
     "issues": []
 }
 ```
 
-evolution_pattern 选项: incremental_enhancement/iterative_bugfix/long_term_refactoring/collaborative_development
-function_types 选项: ENH/BUG/MAINT/DOC/TST/PERF
+evolution_pattern options: incremental_enhancement/iterative_bugfix/long_term_refactoring/collaborative_development
+function_types options: ENH/BUG/MAINT/DOC/TST/PERF
 """
         return prompt
 
     def _parse_response(self, text: str) -> LLMJudgment:
         """解析 LLM 响应"""
-        # 提取 JSON
         start = text.find('{')
         end = text.rfind('}') + 1
         json_str = text[start:end]

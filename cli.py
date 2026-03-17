@@ -15,7 +15,13 @@ def load_config(config_path: str) -> dict:
 
     # 替换环境变量
     config['github']['token'] = os.getenv('GITHUB_TOKEN', config['github']['token'])
-    config['anthropic']['api_key'] = os.getenv('ANTHROPIC_API_KEY', config['anthropic']['api_key'])
+
+    # LLM 配置
+    if config['llm']['provider'] == 'anthropic':
+        config['llm']['api_key'] = os.getenv('ANTHROPIC_API_KEY', config['llm']['api_key'])
+    else:  # openai
+        config['llm']['api_key'] = os.getenv('OPENAI_API_KEY', config['llm']['api_key'])
+
     return config
 
 @click.group()
@@ -41,9 +47,11 @@ def filter(input, output, config, max_chains):
     )
 
     llm_judge = LLMJudge(
-        api_key=cfg['anthropic']['api_key'],
-        model=cfg['anthropic']['model'],
-        max_tokens=cfg['anthropic']['max_tokens']
+        provider=cfg['llm']['provider'],
+        api_key=cfg['llm']['api_key'],
+        model=cfg['llm']['model'],
+        base_url=cfg['llm'].get('base_url'),
+        max_tokens=cfg['llm']['max_tokens']
     )
 
     chain_filter = ChainFilter(fetcher, llm_judge, cfg)

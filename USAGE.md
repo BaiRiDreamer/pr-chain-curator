@@ -4,9 +4,33 @@
 
 ### 1. 设置环境变量
 
+**使用 OpenAI (推荐)**:
+```bash
+export GITHUB_TOKEN="your_github_access_token"
+export OPENAI_API_KEY="your_openai_api_key"
+```
+
+**使用 Anthropic Claude**:
 ```bash
 export GITHUB_TOKEN="your_github_access_token"
 export ANTHROPIC_API_KEY="your_anthropic_api_key"
+```
+
+然后编辑 `config/config.yaml` 设置 `llm.provider` 为 `anthropic`。
+
+**使用 DeepSeek 或其他 OpenAI 兼容 API**:
+```bash
+export GITHUB_TOKEN="your_github_access_token"
+export DEEPSEEK_API_KEY="your_deepseek_api_key"
+```
+
+编辑 `config/config.yaml`:
+```yaml
+llm:
+  provider: openai
+  api_key: ${DEEPSEEK_API_KEY}
+  model: deepseek-chat
+  base_url: https://api.deepseek.com
 ```
 
 ### 2. 运行筛选（测试 5 条链）
