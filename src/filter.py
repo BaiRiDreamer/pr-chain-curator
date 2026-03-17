@@ -49,6 +49,10 @@ class ChainFilter:
                 ))
                 continue
 
+            # 按时间顺序调整 PR 链
+            prs = sorted(prs, key=lambda pr: pr.created_at)
+            chain = [pr.pr_id for pr in prs]
+
             # 检查是否所有 PR 已合并
             if not all(pr.merged_at for pr in prs):
                 results.append(FilterResult(
