@@ -1,20 +1,27 @@
 """GitHub API 封装"""
-import requests
 import time
+from email.utils import parsedate_to_datetime
 from datetime import datetime
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 from .cache import FileCache
 from .models import PullRequest
 
 class GitHubFetcher:
     """GitHub API 获取器"""
 
-    def __init__(self, token: str, cache_dir: str, rate_limit_delay: float = 0.5):
+    def __init__(self, token: str, cache_dir: str, rate_limit_delay: float = 0.5,
+                 request_timeout: float = 30.0, max_retries: int = 3,
+                 retry_backoff: float = 2.0, max_retry_wait: float = 60.0):
         self.token = token
         self.headers = {"Authorization": f"token {token}"}
         self.cache = FileCache(cache_dir)
         self.rate_limit_delay = rate_limit_delay
+        self.request_timeout = request_timeout
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
+        self.max_retry_wait = max_retry_wait
 
     def fetch_pr_batch(self, pr_ids: List[str], max_workers: int = 20,
                        fetch_files: bool = False) -> Dict[str, PullRequest]:
@@ -59,15 +66,104 @@ class GitHubFetcher:
     def _call_api(self, endpoint: str) -> Optional[Dict]:
         """调用 GitHub API"""
         url = f"https://api.github.com{endpoint}"
-        try:
-            response = requests.get(url, headers=self.headers)
-            time.sleep(self.rate_limit_delay)
-            if response.status_code == 200:
-                return response.json()
-            print(f"API error {response.status_code}: {endpoint}")
-        except Exception as e:
-            print(f"Request error: {e}")
+        for attempt in range(1, self.max_retries + 2):
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    timeout=self.request_timeout
+                )
+                time.sleep(self.rate_limit_delay)
+                if response.status_code == 200:
+                    return response.json()
+
+                if self._should_retry_response(response) and attempt <= self.max_retries:
+                    wait_seconds = self._get_retry_wait(response, attempt)
+                    print(
+                        f"GitHub API transient error {response.status_code} on {endpoint}, "
+                        f"retrying in {wait_seconds:.1f}s ({attempt}/{self.max_retries})"
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+
+                print(f"GitHub API error {response.status_code}: {endpoint}")
+                return None
+            except requests.exceptions.Timeout as e:
+                if attempt <= self.max_retries:
+                    wait_seconds = self._get_retry_wait(None, attempt)
+                    print(
+                        f"GitHub API timeout on {endpoint}, retrying in {wait_seconds:.1f}s "
+                        f"({attempt}/{self.max_retries})"
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                print(f"GitHub API timeout: {endpoint}: {e}")
+            except requests.exceptions.ConnectionError as e:
+                if attempt <= self.max_retries:
+                    wait_seconds = self._get_retry_wait(None, attempt)
+                    print(
+                        f"GitHub API connection error on {endpoint}, retrying in {wait_seconds:.1f}s "
+                        f"({attempt}/{self.max_retries})"
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                print(f"GitHub API connection error: {endpoint}: {e}")
+            except requests.exceptions.RequestException as e:
+                if attempt <= self.max_retries and self._is_retryable_request_exception(e):
+                    wait_seconds = self._get_retry_wait(None, attempt)
+                    print(
+                        f"GitHub API request error on {endpoint}, retrying in {wait_seconds:.1f}s "
+                        f"({attempt}/{self.max_retries})"
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                print(f"GitHub API request error: {endpoint}: {e}")
+                return None
         return None
+
+    def _should_retry_response(self, response: requests.Response) -> bool:
+        """判断响应是否适合重试"""
+        if response.status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+            return True
+        if response.status_code == 403:
+            remaining = response.headers.get("X-RateLimit-Remaining")
+            body = response.text.lower()
+            if remaining == "0" or "rate limit" in body:
+                return True
+        return False
+
+    def _is_retryable_request_exception(self, error: requests.exceptions.RequestException) -> bool:
+        """判断 requests 异常是否适合重试"""
+        message = str(error).lower()
+        retry_keywords = [
+            "timed out", "timeout", "tempor", "connection reset",
+            "connection aborted", "remote end closed", "503", "502", "504"
+        ]
+        return any(keyword in message for keyword in retry_keywords)
+
+    def _get_retry_wait(self, response: Optional[requests.Response], attempt: int) -> float:
+        """计算重试等待时间"""
+        if response is not None:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    return min(float(retry_after), self.max_retry_wait)
+                except ValueError:
+                    try:
+                        retry_at = parsedate_to_datetime(retry_after).timestamp()
+                        return min(max(retry_at - time.time(), 1.0), self.max_retry_wait)
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+
+            rate_limit_reset = response.headers.get("X-RateLimit-Reset")
+            if rate_limit_reset:
+                try:
+                    wait_seconds = float(rate_limit_reset) - time.time()
+                    return min(max(wait_seconds, 1.0), self.max_retry_wait)
+                except ValueError:
+                    pass
+
+        return min(self.retry_backoff * (2 ** max(attempt - 1, 0)), self.max_retry_wait)
 
     def _parse_pr_id(self, pr_id: str) -> tuple:
         """解析 PR ID"""

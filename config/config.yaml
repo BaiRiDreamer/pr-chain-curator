@@ -2,12 +2,20 @@ github:
   token: ${GITHUB_TOKEN}
   rate_limit_delay: 0.5
   max_workers: 20
+  request_timeout: 30
+  max_retries: 4
+  retry_backoff: 2
+  max_retry_wait: 120
 
 llm:
   provider: azure  # anthropic, openai, or azure
   api_key: apikey
   model: gpt-5.4-2026-03-05
   max_tokens: 2048
+  request_timeout: 60
+  max_retries: 3
+  retry_backoff: 3
+  max_retry_wait: 120
 
   # Azure OpenAI specific
   api_version: "2024-02-01"

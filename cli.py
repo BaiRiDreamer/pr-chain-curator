@@ -21,6 +21,11 @@ def load_config(config_path: str) -> dict:
     # LLM 配置
     if config['llm']['provider'] == 'anthropic':
         config['llm']['api_key'] = os.getenv('ANTHROPIC_API_KEY', config['llm']['api_key'])
+    elif config['llm']['provider'] == 'azure':
+        config['llm']['api_key'] = os.getenv(
+            'AZURE_OPENAI_API_KEY',
+            os.getenv('OPENAI_API_KEY', config['llm']['api_key'])
+        )
     else:  # openai
         config['llm']['api_key'] = os.getenv('OPENAI_API_KEY', config['llm']['api_key'])
 
@@ -47,6 +52,44 @@ def serialize_filter_result(result) -> dict:
         'issues': result.issues
     }
 
+def build_chain_resume_key(chain_id: str, chain: list) -> str:
+    """为断点续跑构造稳定键"""
+    chain_json = json.dumps(chain, ensure_ascii=False, separators=(',', ':'))
+    return f"{chain_id}|{chain_json}"
+
+def load_completed_results(output_path: str) -> tuple[set[str], int, int, int]:
+    """读取已完成结果，用于断点续跑"""
+    completed_status = {}
+    invalid_lines = 0
+    path = Path(output_path)
+
+    if not path.exists():
+        return set(), 0, 0, invalid_lines
+
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_lines += 1
+                continue
+
+            chain_id = item.get('chain_id')
+            chain = item.get('original_chain')
+            if not chain_id or not isinstance(chain, list):
+                invalid_lines += 1
+                continue
+
+            completed_status[build_chain_resume_key(chain_id, chain)] = item.get('status')
+
+    approved = sum(1 for status in completed_status.values() if status == 'approved')
+    rejected = sum(1 for status in completed_status.values() if status != 'approved')
+    return set(completed_status.keys()), approved, rejected, invalid_lines
+
 @click.group()
 def cli():
     """PR Chain Curator - 筛选和标注 PR 链"""
@@ -67,7 +110,11 @@ def filter(input, output, config, max_chains, chain_workers):
     fetcher = GitHubFetcher(
         token=cfg['github']['token'],
         cache_dir=cfg['cache']['dir'],
-        rate_limit_delay=cfg['github']['rate_limit_delay']
+        rate_limit_delay=cfg['github']['rate_limit_delay'],
+        request_timeout=cfg['github'].get('request_timeout', 30.0),
+        max_retries=cfg['github'].get('max_retries', 3),
+        retry_backoff=cfg['github'].get('retry_backoff', 2.0),
+        max_retry_wait=cfg['github'].get('max_retry_wait', 60.0)
     )
 
     llm_judge = LLMJudge(
@@ -78,7 +125,11 @@ def filter(input, output, config, max_chains, chain_workers):
         max_tokens=cfg['llm']['max_tokens'],
         api_version=cfg['llm'].get('api_version'),
         azure_endpoint=cfg['llm'].get('azure_endpoint'),
-        default_headers=cfg['llm'].get('default_headers')
+        default_headers=cfg['llm'].get('default_headers'),
+        request_timeout=cfg['llm'].get('request_timeout', 60.0),
+        max_retries=cfg['llm'].get('max_retries', 3),
+        retry_backoff=cfg['llm'].get('retry_backoff', 2.0),
+        max_retry_wait=cfg['llm'].get('max_retry_wait', 60.0)
     )
 
     chain_filter = ChainFilter(fetcher, llm_judge, cfg)
@@ -91,21 +142,38 @@ def filter(input, output, config, max_chains, chain_workers):
     if max_chains:
         chains = chains[:max_chains]
 
+    completed_keys, approved, rejected, invalid_lines = load_completed_results(output)
+    pending = []
+    for idx, chain in enumerate(chains):
+        chain_id = f"chain_{idx:04d}"
+        if build_chain_resume_key(chain_id, chain) in completed_keys:
+            continue
+        pending.append((idx, chain_id, chain))
+
     total = len(chains)
     chain_workers = chain_workers or cfg['filtering'].get('chain_workers', 1)
-    chain_workers = max(1, min(chain_workers, total)) if total > 0 else 1
+    chain_workers = max(1, min(chain_workers, len(pending))) if pending else 1
 
-    click.echo(f"Processing {total} chains with {chain_workers} chain worker(s)...")
+    click.echo(
+        f"Processing {total} chains with {chain_workers} chain worker(s); "
+        f"{len(completed_keys)} already completed, {len(pending)} pending."
+    )
+    if invalid_lines > 0:
+        click.echo(
+            f"Warning: ignored {invalid_lines} invalid line(s) in existing output during resume."
+        )
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
-    approved = 0
-    rejected = 0
+    if not pending:
+        click.echo(f"\nResults: {approved} approved, {rejected} rejected")
+        click.echo(f"Results already complete in {output}")
+        return
 
-    with open(output, 'w', encoding='utf-8', buffering=1) as f:
+    file_mode = 'a' if completed_keys else 'w'
+    with open(output, file_mode, encoding='utf-8', buffering=1) as f:
         with ThreadPoolExecutor(max_workers=chain_workers) as executor:
             futures = {}
-            for idx, chain in enumerate(chains):
-                chain_id = f"chain_{idx:04d}"
+            for idx, chain_id, chain in pending:
                 futures[executor.submit(chain_filter.filter_chain, chain_id, chain)] = (
                     idx + 1, chain_id, chain
                 )
