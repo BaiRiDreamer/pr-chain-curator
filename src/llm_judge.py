@@ -1,6 +1,6 @@
 """LLM 判断模块 - 支持 Claude、OpenAI 和 Azure OpenAI"""
 import json
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional
 from .models import PullRequest, LLMJudgment
 
 class LLMJudge:
@@ -9,10 +9,13 @@ class LLMJudge:
     def __init__(self, provider: str, api_key: str, model: str,
                  base_url: str = None, max_tokens: int = 2048,
                  api_version: str = None, azure_endpoint: str = None,
-                 default_headers: Dict = None):
+                 default_headers: Dict = None, stream_output: bool = False,
+                 stream_handler: Optional[Callable[[str], None]] = None):
         self.provider = provider.lower()
         self.model = model
         self.max_tokens = max_tokens
+        self.stream_output = stream_output
+        self.stream_handler = stream_handler
 
         if self.provider == "anthropic":
             import anthropic
@@ -35,34 +38,112 @@ class LLMJudge:
         """判断 PR 链质量"""
         prompt = self._build_prompt(prs, repo)
 
+        if self.stream_output:
+            text = self._judge_chain_streaming(prompt)
+        else:
+            text = self._judge_chain_non_streaming(prompt)
+
+        result = self._parse_response(text)
+        return result
+
+    def _judge_chain_non_streaming(self, prompt: str) -> str:
+        """非流式调用 LLM"""
         if self.provider == "anthropic":
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 messages=[{"role": "user", "content": prompt}]
             )
-            text = response.content[0].text
-        else:  # openai or azure
-            response = self.client.chat.completions.create(
+            return response.content[0].text
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            stream=False
+        )
+        return response.choices[0].message.content
+
+    def _judge_chain_streaming(self, prompt: str) -> str:
+        """流式调用 LLM，并累计完整文本用于解析"""
+        if self.provider == "anthropic":
+            chunks = []
+            with self.client.messages.stream(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            }
-                        ]
-                    }
-                ],
-                stream=False
-            )
-            text = response.choices[0].message.content
+                messages=[{"role": "user", "content": prompt}]
+            ) as stream:
+                for text in stream.text_stream:
+                    chunks.append(text)
+                    self._emit_stream_chunk(text)
+            return "".join(chunks)
 
-        result = self._parse_response(text)
-        return result
+        chunks = []
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            stream=True
+        )
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            text = self._extract_openai_chunk_text(chunk.choices[0].delta.content)
+            if not text:
+                continue
+            chunks.append(text)
+            self._emit_stream_chunk(text)
+
+        return "".join(chunks)
+
+    def _emit_stream_chunk(self, text: str):
+        """向外发送流式文本"""
+        if self.stream_handler:
+            self.stream_handler(text)
+
+    def _extract_openai_chunk_text(self, content) -> str:
+        """兼容不同 OpenAI SDK delta 结构"""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                item_text = getattr(item, "text", None)
+                if item_text:
+                    parts.append(item_text)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text:
+                        parts.append(text)
+            return "".join(parts)
+        return getattr(content, "text", "") or ""
 
     def _build_prompt(self, prs: List[PullRequest], repo: str) -> str:
         """构建 LLM prompt (英文)"""

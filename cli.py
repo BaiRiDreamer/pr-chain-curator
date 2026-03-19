@@ -1,6 +1,7 @@
 """命令行入口"""
 import json
 import os
+import sys
 import yaml
 import click
 from pathlib import Path
@@ -24,6 +25,27 @@ def load_config(config_path: str) -> dict:
 
     return config
 
+def serialize_filter_result(result) -> dict:
+    """序列化筛选结果，用于 JSONL 流式写出"""
+    return {
+        'chain_id': result.chain_id,
+        'original_chain': result.original_chain,
+        'status': result.status,
+        'quality_score': result.quality_score,
+        'file_overlap_rate': result.file_overlap_rate,
+        'llm_judgment': {
+            'is_valid_chain': result.llm_judgment.is_valid_chain,
+            'confidence': result.llm_judgment.confidence,
+            'overall_score': result.llm_judgment.overall_score,
+            'scores': result.llm_judgment.scores,
+            'reasoning': result.llm_judgment.reasoning,
+            'evolution_pattern': result.llm_judgment.evolution_pattern,
+            'function_types': result.llm_judgment.function_types,
+            'issues': result.llm_judgment.issues
+        } if result.llm_judgment else None,
+        'issues': result.issues
+    }
+
 @click.group()
 def cli():
     """PR Chain Curator - 筛选和标注 PR 链"""
@@ -34,10 +56,15 @@ def cli():
 @click.option('--output', required=True, help='输出文件路径')
 @click.option('--config', default='config/config.yaml', help='配置文件')
 @click.option('--max-chains', type=int, help='限制处理数量')
-def filter(input, output, config, max_chains):
+@click.option('--stream-llm/--no-stream-llm', default=True, help='是否流式输出 LLM 响应')
+def filter(input, output, config, max_chains, stream_llm):
     """筛选 PR 链"""
     # 加载配置
     cfg = load_config(config)
+
+    def stream_handler(text: str):
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
     # 初始化组件
     fetcher = GitHubFetcher(
@@ -54,7 +81,9 @@ def filter(input, output, config, max_chains):
         max_tokens=cfg['llm']['max_tokens'],
         api_version=cfg['llm'].get('api_version'),
         azure_endpoint=cfg['llm'].get('azure_endpoint'),
-        default_headers=cfg['llm'].get('default_headers')
+        default_headers=cfg['llm'].get('default_headers'),
+        stream_output=stream_llm,
+        stream_handler=stream_handler if stream_llm else None
     )
 
     chain_filter = ChainFilter(fetcher, llm_judge, cfg)
@@ -69,41 +98,44 @@ def filter(input, output, config, max_chains):
 
     click.echo(f"Processing {len(chains)} chains...")
 
-    # 筛选
-    results = chain_filter.filter_chains(chains)
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    approved = 0
+    rejected = 0
+    total = len(chains)
 
-    # 统计
-    approved = sum(1 for r in results if r.status == 'approved')
-    rejected = sum(1 for r in results if r.status == 'rejected')
+    with open(output, 'w', encoding='utf-8') as f:
+        for idx, chain in enumerate(chains, start=1):
+            chain_id = f"chain_{idx - 1:04d}"
+            click.echo(f"\n[{idx}/{total}] Processing {chain_id}: {chain[0]}")
+
+            if stream_llm:
+                click.echo("LLM output:", nl=True)
+
+            result = chain_filter.filter_chain(chain_id, chain)
+
+            if stream_llm and result.llm_judgment is not None:
+                click.echo()
+
+            item = serialize_filter_result(result)
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
+            f.flush()
+
+            if result.status == 'approved':
+                approved += 1
+            else:
+                rejected += 1
+
+            overlap_text = (
+                f", overlap={result.file_overlap_rate:.2f}"
+                if result.file_overlap_rate is not None else ""
+            )
+            click.echo(
+                f"[{idx}/{total}] {result.chain_id} -> {result.status} "
+                f"(score={result.quality_score:.2f}{overlap_text}, "
+                f"approved={approved}, rejected={rejected})"
+            )
 
     click.echo(f"\nResults: {approved} approved, {rejected} rejected")
-
-    # 保存结果
-    output_data = []
-    for result in results:
-        output_data.append({
-            'chain_id': result.chain_id,
-            'original_chain': result.original_chain,
-            'status': result.status,
-            'quality_score': result.quality_score,
-            'file_overlap_rate': result.file_overlap_rate,
-            'llm_judgment': {
-                'is_valid_chain': result.llm_judgment.is_valid_chain,
-                'confidence': result.llm_judgment.confidence,
-                'overall_score': result.llm_judgment.overall_score,
-                'scores': result.llm_judgment.scores,
-                'reasoning': result.llm_judgment.reasoning,
-                'evolution_pattern': result.llm_judgment.evolution_pattern,
-                'function_types': result.llm_judgment.function_types,
-                'issues': result.llm_judgment.issues
-            } if result.llm_judgment else None,
-            'issues': result.issues
-        })
-
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
-    with open(output, 'w') as f:
-        for item in output_data:
-            f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
     click.echo(f"Results saved to {output}")
 
