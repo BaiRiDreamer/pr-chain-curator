@@ -16,6 +16,7 @@ llm:
     X-TT-LOGID: pr-chain-curator
 
 filtering:
+  chain_workers: 4
   min_chain_length: 2
   max_chain_length: 10
   max_time_span_days: 1095

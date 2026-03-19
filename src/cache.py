@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any
+from tempfile import NamedTemporaryFile
 
 class FileCache:
     """文件系统缓存"""
@@ -27,8 +28,13 @@ class FileCache:
     def set(self, key: str, value: Dict[Any, Any]):
         """设置缓存"""
         cache_path = self._get_cache_path(key)
-        with open(cache_path, 'w') as f:
-            json.dump(value, f, indent=2)
+        with NamedTemporaryFile('w', dir=self.cache_dir, delete=False, encoding='utf-8') as tmp_file:
+            json.dump(value, tmp_file, indent=2)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+            temp_path = Path(tmp_file.name)
+
+        os.replace(temp_path, cache_path)
 
     def clear(self):
         """清空缓存"""

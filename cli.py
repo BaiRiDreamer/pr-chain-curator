@@ -4,9 +4,11 @@ import os
 import yaml
 import click
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.fetcher import GitHubFetcher
 from src.llm_judge import LLMJudge
 from src.filter import ChainFilter
+from src.models import FilterResult
 
 def load_config(config_path: str) -> dict:
     """加载配置"""
@@ -55,7 +57,8 @@ def cli():
 @click.option('--output', required=True, help='输出文件路径')
 @click.option('--config', default='config/config.yaml', help='配置文件')
 @click.option('--max-chains', type=int, help='限制处理数量')
-def filter(input, output, config, max_chains):
+@click.option('--chain-workers', type=int, help='链间并发数，默认读取 filtering.chain_workers')
+def filter(input, output, config, max_chains, chain_workers):
     """筛选 PR 链"""
     # 加载配置
     cfg = load_config(config)
@@ -88,39 +91,59 @@ def filter(input, output, config, max_chains):
     if max_chains:
         chains = chains[:max_chains]
 
-    click.echo(f"Processing {len(chains)} chains...")
+    total = len(chains)
+    chain_workers = chain_workers or cfg['filtering'].get('chain_workers', 1)
+    chain_workers = max(1, min(chain_workers, total)) if total > 0 else 1
+
+    click.echo(f"Processing {total} chains with {chain_workers} chain worker(s)...")
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     approved = 0
     rejected = 0
-    total = len(chains)
 
     with open(output, 'w', encoding='utf-8', buffering=1) as f:
-        for idx, chain in enumerate(chains, start=1):
-            chain_id = f"chain_{idx - 1:04d}"
-            click.echo(f"\n[{idx}/{total}] Processing {chain_id}: {chain[0]}")
+        with ThreadPoolExecutor(max_workers=chain_workers) as executor:
+            futures = {}
+            for idx, chain in enumerate(chains):
+                chain_id = f"chain_{idx:04d}"
+                futures[executor.submit(chain_filter.filter_chain, chain_id, chain)] = (
+                    idx + 1, chain_id, chain
+                )
 
-            result = chain_filter.filter_chain(chain_id, chain)
+            for future in as_completed(futures):
+                idx, chain_id, chain = futures[future]
+                click.echo(f"\n[{idx}/{total}] Completed {chain_id}: {chain[0]}")
 
-            item = serialize_filter_result(result)
-            f.write(json.dumps(item, ensure_ascii=False) + '\n')
-            f.flush()
-            os.fsync(f.fileno())
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = FilterResult(
+                        chain_id=chain_id,
+                        original_chain=chain,
+                        status='rejected',
+                        quality_score=0.0,
+                        llm_judgment=None,
+                        issues=[f"unexpected_error: {exc}"]
+                    )
+                item = serialize_filter_result(result)
+                f.write(json.dumps(item, ensure_ascii=False) + '\n')
+                f.flush()
+                os.fsync(f.fileno())
 
-            if result.status == 'approved':
-                approved += 1
-            else:
-                rejected += 1
+                if result.status == 'approved':
+                    approved += 1
+                else:
+                    rejected += 1
 
-            overlap_text = (
-                f", overlap={result.file_overlap_rate:.2f}"
-                if result.file_overlap_rate is not None else ""
-            )
-            click.echo(
-                f"[{idx}/{total}] {result.chain_id} -> {result.status} "
-                f"(score={result.quality_score:.2f}{overlap_text}, "
-                f"approved={approved}, rejected={rejected})"
-            )
+                overlap_text = (
+                    f", overlap={result.file_overlap_rate:.2f}"
+                    if result.file_overlap_rate is not None else ""
+                )
+                click.echo(
+                    f"[{idx}/{total}] {result.chain_id} -> {result.status} "
+                    f"(score={result.quality_score:.2f}{overlap_text}, "
+                    f"approved={approved}, rejected={rejected})"
+                )
 
     click.echo(f"\nResults: {approved} approved, {rejected} rejected")
 
