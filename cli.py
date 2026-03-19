@@ -1,7 +1,6 @@
 """命令行入口"""
 import json
 import os
-import sys
 import yaml
 import click
 from pathlib import Path
@@ -56,15 +55,10 @@ def cli():
 @click.option('--output', required=True, help='输出文件路径')
 @click.option('--config', default='config/config.yaml', help='配置文件')
 @click.option('--max-chains', type=int, help='限制处理数量')
-@click.option('--stream-llm/--no-stream-llm', default=True, help='是否流式输出 LLM 响应')
-def filter(input, output, config, max_chains, stream_llm):
+def filter(input, output, config, max_chains):
     """筛选 PR 链"""
     # 加载配置
     cfg = load_config(config)
-
-    def stream_handler(text: str):
-        sys.stdout.write(text)
-        sys.stdout.flush()
 
     # 初始化组件
     fetcher = GitHubFetcher(
@@ -81,9 +75,7 @@ def filter(input, output, config, max_chains, stream_llm):
         max_tokens=cfg['llm']['max_tokens'],
         api_version=cfg['llm'].get('api_version'),
         azure_endpoint=cfg['llm'].get('azure_endpoint'),
-        default_headers=cfg['llm'].get('default_headers'),
-        stream_output=stream_llm,
-        stream_handler=stream_handler if stream_llm else None
+        default_headers=cfg['llm'].get('default_headers')
     )
 
     chain_filter = ChainFilter(fetcher, llm_judge, cfg)
@@ -103,22 +95,17 @@ def filter(input, output, config, max_chains, stream_llm):
     rejected = 0
     total = len(chains)
 
-    with open(output, 'w', encoding='utf-8') as f:
+    with open(output, 'w', encoding='utf-8', buffering=1) as f:
         for idx, chain in enumerate(chains, start=1):
             chain_id = f"chain_{idx - 1:04d}"
             click.echo(f"\n[{idx}/{total}] Processing {chain_id}: {chain[0]}")
 
-            if stream_llm:
-                click.echo("LLM output:", nl=True)
-
             result = chain_filter.filter_chain(chain_id, chain)
-
-            if stream_llm and result.llm_judgment is not None:
-                click.echo()
 
             item = serialize_filter_result(result)
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
             f.flush()
+            os.fsync(f.fileno())
 
             if result.status == 'approved':
                 approved += 1
