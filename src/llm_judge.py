@@ -73,13 +73,17 @@ Number of PRs: {len(prs)}
 
 """
         for i, pr in enumerate(prs, 1):
+            title = self._normalize_text(pr.title)
+            body = self._normalize_text(pr.body)
+            user = self._normalize_text(pr.user, default="unknown")
+            labels = ', '.join(pr.labels) if pr.labels else 'None'
             prompt += f"""### PR #{i}: {pr.number}
-- Title: {pr.title}
-- Author: {pr.user}
+- Title: {title}
+- Author: {user}
 - Created: {pr.created_at.strftime('%Y-%m-%d')}
 - Merged: {pr.merged_at.strftime('%Y-%m-%d') if pr.merged_at else 'N/A'}
-- Labels: {', '.join(pr.labels) if pr.labels else 'None'}
-- Description: {pr.body[:200]}...
+- Labels: {labels}
+- Description: {body[:200]}...
 - Changes: +{pr.additions} -{pr.deletions} ({pr.changed_files} files)
 
 """
@@ -116,10 +120,18 @@ function_types options: ENH/BUG/MAINT/DOC/TST/PERF
 
     def _parse_response(self, text: str) -> LLMJudgment:
         """解析 LLM 响应"""
+        if text is None:
+            raise ValueError("LLM returned empty content")
+
         start = text.find('{')
         end = text.rfind('}') + 1
+        if start == -1 or end <= start:
+            raise ValueError(f"LLM did not return JSON: {text[:300]}")
+
         json_str = text[start:end]
         data = json.loads(json_str)
+        if not isinstance(data, dict):
+            raise ValueError(f"LLM returned non-object JSON: {json_str[:300]}")
 
         return LLMJudgment(
             is_valid_chain=data['is_valid_chain'],
@@ -131,3 +143,11 @@ function_types options: ENH/BUG/MAINT/DOC/TST/PERF
             function_types=data['function_types'],
             issues=data.get('issues', [])
         )
+
+    def _normalize_text(self, value: Optional[str], default: str = "") -> str:
+        """将可能为 None 的文本字段归一化为字符串"""
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value
+        return str(value)

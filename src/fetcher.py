@@ -79,8 +79,8 @@ class GitHubFetcher:
         return PullRequest(
             repo=repo,
             number=data['number'],
-            title=data['title'],
-            body=data.get('body', ''),
+            title=data.get('title') or '',
+            body=data.get('body') or '',
             created_at=datetime.fromisoformat(data['created_at'].replace('Z', '+00:00')),
             merged_at=datetime.fromisoformat(data['merged_at'].replace('Z', '+00:00')) if data.get('merged_at') else None,
             user=data['user']['login'],
