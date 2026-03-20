@@ -38,7 +38,7 @@ llm:
 ```bash
 cd ~/Repos/pr-chain-curator
 
-python cli.py filter \
+python3 cli.py filter \
   --input data/input/PR-list.jsonl \
   --output data/output/filtered.jsonl \
   --max-chains 5
@@ -47,13 +47,13 @@ python cli.py filter \
 ### 3. 查看统计
 
 ```bash
-python cli.py stats --input data/output/filtered.jsonl
+python3 cli.py stats --input data/output/filtered.jsonl
 ```
 
 ## 完整运行（所有 149 条链）
 
 ```bash
-python cli.py filter \
+python3 cli.py filter \
   --input data/input/PR-list.jsonl \
   --output data/output/filtered_all.jsonl
 ```
@@ -69,7 +69,7 @@ python cli.py filter \
 
 ```json
 {
-  "chain_id": "chain_0001",
+  "chain_id": "scipy/scipy|229|243|6f7c4f2a",
   "original_chain": ["scipy/scipy#229", "scipy/scipy#243"],
   "status": "approved",
   "quality_score": 8.5,
@@ -115,6 +115,14 @@ cat data/output/filtered.jsonl | jq 'select(.status == "approved")' > data/outpu
 total=$(cat data/output/filtered.jsonl | wc -l)
 approved=$(cat data/output/filtered.jsonl | jq 'select(.status == "approved")' | wc -l)
 echo "通过率: $approved / $total"
+```
+
+## 清理重复输出
+
+```bash
+python3 cli.py compact-output \
+  --input data/output/filtered.jsonl \
+  --output data/output/filtered.compacted.jsonl
 ```
 
 ## 调整筛选阈值

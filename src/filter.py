@@ -1,5 +1,6 @@
 """筛选器模块"""
 from typing import Iterator, List, Dict, Tuple, Optional
+from .chain_identity import build_chain_id
 from .models import PullRequest, FilterResult, LLMJudgment
 from .fetcher import GitHubFetcher
 from .llm_judge import LLMJudge
@@ -19,8 +20,8 @@ class ChainFilter:
 
     def iter_filter_chains(self, chains: List[List[str]]) -> Iterator[FilterResult]:
         """流式筛选 PR 链，逐条返回结果"""
-        for idx, chain in enumerate(chains):
-            chain_id = f"chain_{idx:04d}"
+        for chain in chains:
+            chain_id = build_chain_id(chain)
             yield self.filter_chain(chain_id, chain)
 
     def filter_chain(self, chain_id: str, chain: List[str]) -> FilterResult:
@@ -29,12 +30,14 @@ class ChainFilter:
 
     def _filter_single_chain(self, chain_id: str, chain: List[str]) -> FilterResult:
         """筛选单条 PR 链"""
+        input_chain = list(chain)
+
         # 预筛选
-        passed, reason = self._pre_filter(chain)
+        passed, reason = self._pre_filter(input_chain)
         if not passed:
             return FilterResult(
                 chain_id=chain_id,
-                original_chain=chain,
+                original_chain=input_chain,
                 status="rejected",
                 quality_score=0.0,
                 llm_judgment=None,
@@ -43,16 +46,16 @@ class ChainFilter:
 
         # 获取 PR 信息
         pr_data = self.fetcher.fetch_pr_batch(
-            chain,
+            input_chain,
             max_workers=self.max_workers,
             fetch_files=False
         )
-        prs = [pr_data[pr_id] for pr_id in chain if pr_id in pr_data]
+        prs = [pr_data[pr_id] for pr_id in input_chain if pr_data.get(pr_id) is not None]
 
-        if len(prs) != len(chain):
+        if len(prs) != len(input_chain):
             return FilterResult(
                 chain_id=chain_id,
-                original_chain=chain,
+                original_chain=input_chain,
                 status="rejected",
                 quality_score=0.0,
                 llm_judgment=None,
@@ -61,13 +64,13 @@ class ChainFilter:
 
         # 按时间顺序调整 PR 链
         prs = sorted(prs, key=lambda pr: pr.created_at)
-        chain = [pr.pr_id for pr in prs]
+        ordered_chain = [pr.pr_id for pr in prs]
 
         # 检查是否所有 PR 已合并
         if not all(pr.merged_at for pr in prs):
             return FilterResult(
                 chain_id=chain_id,
-                original_chain=chain,
+                original_chain=input_chain,
                 status="rejected",
                 quality_score=0.0,
                 llm_judgment=None,
@@ -80,7 +83,7 @@ class ChainFilter:
         except Exception as e:
             return FilterResult(
                 chain_id=chain_id,
-                original_chain=chain,
+                original_chain=input_chain,
                 status="rejected",
                 quality_score=0.0,
                 llm_judgment=None,
@@ -90,14 +93,14 @@ class ChainFilter:
         # 文件重叠分析（如果需要）
         file_overlap = None
         if llm_result.overall_score >= 5.0:
-            file_overlap = self._analyze_file_overlap(chain)
+            file_overlap = self._analyze_file_overlap(ordered_chain)
 
         # 最终决策
         status = self._make_decision(llm_result, file_overlap)
 
         return FilterResult(
             chain_id=chain_id,
-            original_chain=chain,
+            original_chain=input_chain,
             status=status,
             quality_score=llm_result.overall_score,
             llm_judgment=llm_result,

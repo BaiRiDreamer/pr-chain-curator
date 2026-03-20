@@ -63,7 +63,9 @@ llm:
 
 ```yaml
 github:
-  token: ${GITHUB_TOKEN}
+  tokens:
+    - ${GITHUB_TOKEN}
+    - ${GITHUB_TOKEN_BACKUP}
   rate_limit_delay: 0.5
   max_workers: 20
 

@@ -1,94 +1,21 @@
 """命令行入口"""
 import json
 import os
-import yaml
 import click
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from src.chain_identity import build_chain_id
+from src.config_loader import load_config
 from src.fetcher import GitHubFetcher
 from src.llm_judge import LLMJudge
 from src.filter import ChainFilter
 from src.models import FilterResult
-
-def load_config(config_path: str) -> dict:
-    """加载配置"""
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    # 替换环境变量
-    config['github']['token'] = os.getenv('GITHUB_TOKEN', config['github']['token'])
-
-    # LLM 配置
-    if config['llm']['provider'] == 'anthropic':
-        config['llm']['api_key'] = os.getenv('ANTHROPIC_API_KEY', config['llm']['api_key'])
-    elif config['llm']['provider'] == 'azure':
-        config['llm']['api_key'] = os.getenv(
-            'AZURE_OPENAI_API_KEY',
-            os.getenv('OPENAI_API_KEY', config['llm']['api_key'])
-        )
-    else:  # openai
-        config['llm']['api_key'] = os.getenv('OPENAI_API_KEY', config['llm']['api_key'])
-
-    return config
-
-def serialize_filter_result(result) -> dict:
-    """序列化筛选结果，用于 JSONL 流式写出"""
-    return {
-        'chain_id': result.chain_id,
-        'original_chain': result.original_chain,
-        'status': result.status,
-        'quality_score': result.quality_score,
-        'file_overlap_rate': result.file_overlap_rate,
-        'llm_judgment': {
-            'is_valid_chain': result.llm_judgment.is_valid_chain,
-            'confidence': result.llm_judgment.confidence,
-            'overall_score': result.llm_judgment.overall_score,
-            'scores': result.llm_judgment.scores,
-            'reasoning': result.llm_judgment.reasoning,
-            'evolution_pattern': result.llm_judgment.evolution_pattern,
-            'function_types': result.llm_judgment.function_types,
-            'issues': result.llm_judgment.issues
-        } if result.llm_judgment else None,
-        'issues': result.issues
-    }
-
-def build_chain_resume_key(chain_id: str, chain: list) -> str:
-    """为断点续跑构造稳定键"""
-    chain_json = json.dumps(chain, ensure_ascii=False, separators=(',', ':'))
-    return f"{chain_id}|{chain_json}"
-
-def load_completed_results(output_path: str) -> tuple[set[str], int, int, int]:
-    """读取已完成结果，用于断点续跑"""
-    completed_status = {}
-    invalid_lines = 0
-    path = Path(output_path)
-
-    if not path.exists():
-        return set(), 0, 0, invalid_lines
-
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                invalid_lines += 1
-                continue
-
-            chain_id = item.get('chain_id')
-            chain = item.get('original_chain')
-            if not chain_id or not isinstance(chain, list):
-                invalid_lines += 1
-                continue
-
-            completed_status[build_chain_resume_key(chain_id, chain)] = item.get('status')
-
-    approved = sum(1 for status in completed_status.values() if status == 'approved')
-    rejected = sum(1 for status in completed_status.values() if status != 'approved')
-    return set(completed_status.keys()), approved, rejected, invalid_lines
+from src.result_store import (
+    load_compacted_results,
+    load_result_snapshot,
+    serialize_filter_result,
+    write_results_jsonl,
+)
 
 @click.group()
 def cli():
@@ -105,10 +32,12 @@ def filter(input, output, config, max_chains, chain_workers):
     """筛选 PR 链"""
     # 加载配置
     cfg = load_config(config)
+    if not cfg['github'].get('tokens'):
+        raise click.ClickException("No GitHub tokens configured. Set github.tokens or GITHUB_TOKEN.")
 
     # 初始化组件
     fetcher = GitHubFetcher(
-        token=cfg['github']['token'],
+        tokens=cfg['github']['tokens'],
         cache_dir=cfg['cache']['dir'],
         rate_limit_delay=cfg['github']['rate_limit_delay'],
         request_timeout=cfg['github'].get('request_timeout', 30.0),
@@ -142,12 +71,17 @@ def filter(input, output, config, max_chains, chain_workers):
     if max_chains:
         chains = chains[:max_chains]
 
-    completed_keys, approved, rejected, invalid_lines = load_completed_results(output)
+    snapshot = load_result_snapshot(output)
     pending = []
-    for idx, chain in enumerate(chains):
-        chain_id = f"chain_{idx:04d}"
-        if build_chain_resume_key(chain_id, chain) in completed_keys:
+    seen_chain_ids = set(snapshot.completed_ids)
+    duplicate_inputs = 0
+    for idx, chain in enumerate(chains, start=1):
+        chain_id = build_chain_id(chain)
+        if chain_id in seen_chain_ids:
+            if chain_id not in snapshot.completed_ids:
+                duplicate_inputs += 1
             continue
+        seen_chain_ids.add(chain_id)
         pending.append((idx, chain_id, chain))
 
     total = len(chains)
@@ -156,26 +90,35 @@ def filter(input, output, config, max_chains, chain_workers):
 
     click.echo(
         f"Processing {total} chains with {chain_workers} chain worker(s); "
-        f"{len(completed_keys)} already completed, {len(pending)} pending."
+        f"{len(snapshot.completed_ids)} already completed, {len(pending)} pending."
     )
-    if invalid_lines > 0:
+    if duplicate_inputs > 0:
+        click.echo(f"Skipped {duplicate_inputs} duplicate chain(s) already present in the current input.")
+    if snapshot.invalid_lines > 0:
         click.echo(
-            f"Warning: ignored {invalid_lines} invalid line(s) in existing output during resume."
+            f"Warning: ignored {snapshot.invalid_lines} invalid line(s) in existing output during resume."
+        )
+    if snapshot.duplicate_ids > 0:
+        click.echo(
+            f"Warning: existing output contains {snapshot.duplicate_ids} duplicate chain id line(s). "
+            f"Run `compact-output` to clean it."
         )
 
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
     if not pending:
-        click.echo(f"\nResults: {approved} approved, {rejected} rejected")
+        click.echo(f"\nResults: {snapshot.approved} approved, {snapshot.rejected} rejected")
         click.echo(f"Results already complete in {output}")
         return
 
-    file_mode = 'a' if completed_keys else 'w'
+    approved = snapshot.approved
+    rejected = snapshot.rejected
+    os.makedirs(os.path.dirname(output) or '.', exist_ok=True)
+    file_mode = 'a' if snapshot.completed_ids else 'w'
     with open(output, file_mode, encoding='utf-8', buffering=1) as f:
         with ThreadPoolExecutor(max_workers=chain_workers) as executor:
             futures = {}
             for idx, chain_id, chain in pending:
                 futures[executor.submit(chain_filter.filter_chain, chain_id, chain)] = (
-                    idx + 1, chain_id, chain
+                    idx, chain_id, chain
                 )
 
             for future in as_completed(futures):
@@ -217,14 +160,32 @@ def filter(input, output, config, max_chains, chain_workers):
 
     click.echo(f"Results saved to {output}")
 
+
+@cli.command('compact-output')
+@click.option('--input', 'input_path', required=True, help='输入结果文件（JSONL）')
+@click.option('--output', 'output_path', required=True, help='输出去重后的结果文件（JSONL）')
+def compact_output(input_path, output_path):
+    """按 chain_id 去重结果文件，保留每个 chain_id 的最后一条记录"""
+    compacted, invalid_lines = load_compacted_results(input_path)
+    write_results_jsonl(output_path, compacted.values())
+    click.echo(
+        f"Compacted {len(compacted)} unique chain(s) to {output_path}."
+    )
+    if invalid_lines > 0:
+        click.echo(f"Ignored {invalid_lines} invalid line(s) while compacting.")
+
 @cli.command()
 @click.option('--input', required=True, help='筛选结果文件')
 def stats(input):
     """显示统计信息"""
-    results = []
-    with open(input) as f:
-        for line in f:
-            results.append(json.loads(line))
+    compacted, invalid_lines = load_compacted_results(input)
+    results = list(compacted.values())
+
+    if not results:
+        click.echo("No valid data found in input file.")
+        if invalid_lines > 0:
+            click.echo(f"Ignored {invalid_lines} invalid line(s).")
+        return
 
     total = len(results)
     approved = sum(1 for r in results if r['status'] == 'approved')
@@ -254,6 +215,9 @@ def stats(input):
         click.echo(f"\nEvolution patterns:")
         for pattern, count in sorted(patterns.items(), key=lambda x: -x[1]):
             click.echo(f"  {pattern}: {count}")
+
+    if invalid_lines > 0:
+        click.echo(f"\nIgnored invalid lines: {invalid_lines}")
 
 if __name__ == '__main__':
     cli()

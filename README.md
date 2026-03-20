@@ -15,7 +15,7 @@
 
 ```bash
 cd ~/Repos/pr-chain-curator
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 ## 配置
@@ -64,6 +64,14 @@ llm:
   base_url: https://api.deepseek.com
 ```
 
+GitHub token 也可以配置成池：
+```yaml
+github:
+  tokens:
+    - ${GITHUB_TOKEN}
+    - ${GITHUB_TOKEN_BACKUP}
+```
+
 更多配置示例见 `config/config.examples.md`。
 
 ## 使用
@@ -71,7 +79,7 @@ llm:
 ### 筛选 PR 链
 
 ```bash
-python cli.py filter \
+python3 cli.py filter \
   --input data/input/PR-list.jsonl \
   --output data/output/filtered.jsonl \
   --max-chains 10
@@ -80,14 +88,14 @@ python cli.py filter \
 ### 查看统计
 
 ```bash
-python cli.py stats --input data/output/filtered.jsonl
+python3 cli.py stats --input data/output/filtered.jsonl
 ```
 
 ## 输出格式
 
 ```json
 {
-  "chain_id": "chain_0001",
+  "chain_id": "scipy/scipy|229|243|6f7c4f2a",
   "original_chain": ["scipy/scipy#229", "scipy/scipy#243"],
   "status": "approved",
   "quality_score": 8.5,
@@ -109,6 +117,16 @@ python cli.py stats --input data/output/filtered.jsonl
 - **LLM 评分**: overall_score >= 7.0
 - **文件重叠**: 相邻 PR 文件重叠率 >= 30%（边界情况）
 
+## 结果维护
+
+如果历史 output 中已有重复结果，可以先压缩：
+
+```bash
+python3 cli.py compact-output \
+  --input data/output/filtered.jsonl \
+  --output data/output/filtered.compacted.jsonl
+```
+
 ## 项目结构
 
 ```
@@ -116,11 +134,15 @@ pr-chain-curator/
 ├── cli.py              # 命令行入口
 ├── config/             # 配置文件
 ├── src/
-│   ├── models.py       # 数据模型
-│   ├── cache.py        # 缓存机制
-│   ├── fetcher.py      # GitHub API
-│   ├── llm_judge.py    # LLM 判断
-│   └── filter.py       # 筛选逻辑
+│   ├── models.py            # 数据模型
+│   ├── cache.py             # 缓存机制
+│   ├── chain_identity.py    # 稳定 chain_id 生成
+│   ├── config_loader.py     # 配置加载
+│   ├── github_token_pool.py # GitHub token 池
+│   ├── result_store.py      # 结果读写/续跑/去重
+│   ├── fetcher.py           # GitHub API
+│   ├── llm_judge.py         # LLM 判断
+│   └── filter.py            # 筛选逻辑
 └── data/
     ├── input/          # 输入数据
     ├── output/         # 筛选结果

@@ -24,13 +24,6 @@ class PullRequest:
         return f"{self.repo}#{self.number}"
 
 @dataclass
-class PRChain:
-    """PR 链"""
-    chain_id: str
-    pr_ids: List[str]
-    prs: List[PullRequest] = field(default_factory=list)
-
-@dataclass
 class LLMJudgment:
     """LLM 判断结果"""
     is_valid_chain: bool
